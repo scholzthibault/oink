@@ -34,6 +34,8 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Install dependencies
         shell: pwsh
         run: npm ci
@@ -47,10 +49,18 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $ver = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+?)"').Matches[0].Groups[1].Value
-          $exe = Get-ChildItem "apps/oink/src-tauri/target/release/*.exe" |
-                 Where-Object { $_.Name -notmatch '\.pdb$' } | Select-Object -First 1
+          Write-Host "Searching for built exe..."
+          $dirs = @("target/release", "apps/oink/src-tauri/target/release")
+          $exes = Get-ChildItem $dirs -Filter *.exe -ErrorAction SilentlyContinue |
+                  Where-Object { $_.FullName -notmatch 'build\\|deps\\' }
+          $exes | ForEach-Object { Write-Host ("found: {0}  {1:N1} MB" -f $_.FullName, ($_.Length/1MB)) }
+          $exe = $exes | Sort-Object Length -Descending | Select-Object -First 1
           if (-not $exe) { throw "built exe not found" }
+          Write-Host "Using: $($exe.FullName)"
+
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+?)"').Matches[0].Groups[1].Value
+          Write-Host "Version: $ver"
+
           $out = "Oink-$ver-windows-portable"
           New-Item -ItemType Directory -Force "dist/$out" | Out-Null
           Copy-Item $exe.FullName "dist/$out/Oink.exe"
