@@ -1,0 +1,82 @@
+name: Build Windows Portable (unofficial)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-windows-portable.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: portable-build
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: '0'
+  PYTHONUTF8: '1'
+  CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24.14.1'
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        shell: pwsh
+        run: npm ci
+
+      - name: Build Tauri app (no bundle -> raw exe)
+        shell: pwsh
+        working-directory: apps/oink
+        run: npx tauri build --no-bundle
+
+      - name: Collect portable package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+?)"').Matches[0].Groups[1].Value
+          $exe = Get-ChildItem "apps/oink/src-tauri/target/release/*.exe" |
+                 Where-Object { $_.Name -notmatch '\.pdb$' } | Select-Object -First 1
+          if (-not $exe) { throw "built exe not found" }
+          $out = "Oink-$ver-windows-portable"
+          New-Item -ItemType Directory -Force "dist/$out" | Out-Null
+          Copy-Item $exe.FullName "dist/$out/Oink.exe"
+          Copy-Item README.md -Destination "dist/$out"
+          Copy-Item LICENSE -Destination "dist/$out"
+          Copy-Item LICENSE-ADDITIONAL-TERMS.md -Destination "dist/$out"
+          Copy-Item NOTICE -Destination "dist/$out"
+          Compress-Archive -Path "dist/$out/*" -DestinationPath "dist/$out.zip"
+          $hash = (Get-FileHash "dist/$out.zip" -Algorithm SHA256).Hash.ToLower()
+          "ver=$ver"     | Out-File dist/info.txt -Encoding ascii
+          "zip=$out.zip" | Out-File dist/info.txt -Append -Encoding ascii
+          "sha256=$hash" | Out-File dist/info.txt -Append -Encoding ascii
+          Write-Host "Built dist/$out.zip  sha256=$hash"
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $info = @{}
+          Get-Content dist/info.txt | ForEach-Object {
+            $p = $_ -split '=', 2; $info[$p[0]] = $p[1]
+          }
+          $ver = $info['ver']; $zip = "dist/" + $info['zip']; $sha = $info['sha256']
+          $notes = "Unofficial portable build of upstream oinkvm/oink v$ver.`n`n- Source: unmodified upstream v$ver (commit $($env:GITHUB_SHA))`n- Built by GitHub Actions in this fork; no code changes`n- License: GPL-3.0-only with additional terms (see LICENSE files inside)`n- This raw exe is NOT the MSI installer: updater service / autostart components are not registered. If input injection does not work, use the official installer.`n`nSHA256: $sha"
+          $notesPath = "dist/notes.md"
+          [IO.File]::WriteAllText((Join-Path (Get-Location) $notesPath), $notes)
+          gh release create "portable-v$ver" "$zip" --title "Oink $ver Windows Portable (unofficial)" --notes-file $notesPath --target main
